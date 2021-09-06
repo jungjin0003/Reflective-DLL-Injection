@@ -1,11 +1,13 @@
 #include "Reflective.h"
 
+__declspec(naked) void CallDllMain(HINSTANCE hinstDLL);
+
 int main()
 {
-    
+    CallDllMain(NULL);
 }
 
-HMODULE Reflective(HANDLE hProcess, BYTE* MemoryStream)
+HMODULE Reflective(HANDLE hProcess, BYTE *MemoryStream)
 {
     /*printf("[+] File Name : %s\n", DllName);
 
@@ -17,8 +19,11 @@ HMODULE Reflective(HANDLE hProcess, BYTE* MemoryStream)
     ReadFile(hFile, Buffer, Size, &Size, NULL);
     printf("[+] File Opening!\n");*/
 
+    SIZE_T NumberOfBytesWritten;
+    WINBOOL bSuccess;
+
     ULONGLONG RowImageBase = MemoryStream;
-    IMAGE_DOS_HEADER* DOS = MemoryStream;
+    IMAGE_DOS_HEADER *DOS = MemoryStream;
 
     if (DOS->e_magic != MZ)
     {
@@ -26,7 +31,7 @@ HMODULE Reflective(HANDLE hProcess, BYTE* MemoryStream)
         return NULL;
     }
 
-    IMAGE_NT_HEADERS64* NT = RowImageBase + DOS->e_lfanew;
+    IMAGE_NT_HEADERS64 *NT = RowImageBase + DOS->e_lfanew;
 
     if (NT->Signature != PE)
     {
@@ -37,9 +42,9 @@ HMODULE Reflective(HANDLE hProcess, BYTE* MemoryStream)
     ULONGLONG ImageBase;
     ULONGLONG OriginImageBase = NT->OptionalHeader.ImageBase;
 
-    if (!(ImageBase = VirtualAlloc(NT->OptionalHeader.ImageBase, NT->OptionalHeader.SizeOfImage, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)))
+    if (!(ImageBase = VirtualAllocEx(hProcess, NT->OptionalHeader.ImageBase, NT->OptionalHeader.SizeOfImage, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)))
     {
-        ImageBase = VirtualAlloc(NULL, NT->OptionalHeader.SizeOfImage, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        ImageBase = VirtualAllocEx(hProcess, NULL, NT->OptionalHeader.SizeOfImage, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     }
 
     if (ImageBase == NULL)
@@ -49,8 +54,16 @@ HMODULE Reflective(HANDLE hProcess, BYTE* MemoryStream)
     }
     printf("[*] ImageBase : 0x%p\n", ImageBase);
 
-    memcpy(ImageBase, DOS, NT->OptionalHeader.SizeOfHeaders);
-    printf("[+] PE headers writing by %d Byte\n", NT->OptionalHeader.SizeOfHeaders);
+    // memcpy(ImageBase, DOS, NT->OptionalHeader.SizeOfHeaders);
+    bSuccess = WriteProcessMemory(hProcess, ImageBase, DOS, NT->OptionalHeader.SizeOfHeaders, &NumberOfBytesWritten);
+    if (!bSuccess)
+    {
+        Failed("DOS header write failed!");
+        VirtualFreeEx(hProcess, ImageBase, 0, MEM_RELEASE);
+        return NULL;
+    }
+
+    printf("[+] PE headers writing by %d Byte\n", NumberOfBytesWritten);
 
     IMAGE_SECTION_HEADER (*SECTION)[1] = (ULONGLONG)NT + sizeof(IMAGE_NT_HEADERS64);
     printf("[*] First section : 0x%p\n", SECTION);
@@ -58,11 +71,17 @@ HMODULE Reflective(HANDLE hProcess, BYTE* MemoryStream)
     for (int i = 0; i < NT->FileHeader.NumberOfSections; i++)
     {
         printf("[+] Section name : %s\n", SECTION[i]->Name);
-        memcpy(ImageBase + SECTION[i]->VirtualAddress, RowImageBase + SECTION[i]->PointerToRawData, SECTION[i]->SizeOfRawData);
+        bSuccess = WriteProcessMemory(hProcess, ImageBase + SECTION[i]->VirtualAddress, RowImageBase + SECTION[i]->PointerToRawData, SECTION[i]->SizeOfRawData, &NumberOfBytesWritten);
+        if (!bSuccess)
+        {
+            Failed("Section write failed!");
+            VirtualFreeEx(hProcess, ImageBase, 0, MEM_RELEASE);
+            return NULL;
+        }
         printf("[+] Section mapping OK..!\n");
     }
 
-    IMAGE_IMPORT_DESCRIPTOR (*IMPORT)[1] = ImageBase + NT->OptionalHeader.DataDirectory[1].VirtualAddress;
+    /*IMAGE_IMPORT_DESCRIPTOR (*IMPORT)[1] = ImageBase + NT->OptionalHeader.DataDirectory[1].VirtualAddress;
     printf("[*] IAT Recovery\n");
 
     for (int i = 0;; i++)
@@ -85,7 +104,7 @@ HMODULE Reflective(HANDLE hProcess, BYTE* MemoryStream)
 
             if (THUNK->u1.AddressOfData == NULL)
                 break;
-            
+
             if (THUNK->u1.Ordinal > 0x80000000)
                 *(ULONGLONG *)(ImageBase + IMPORT[i]->FirstThunk + j * 8) = GetProcAddress(hModule, MAKEINTRESOURCEA(THUNK->u1.Ordinal));
             else
@@ -95,7 +114,7 @@ HMODULE Reflective(HANDLE hProcess, BYTE* MemoryStream)
                 *(ULONGLONG *)(ImageBase + IMPORT[i]->FirstThunk + j * 8) = GetProcAddress(hModule, IMPORT_NAME->Name);
             }
         }
-    }
+    }*/
 
     if (ImageBase != NT->OptionalHeader.ImageBase)
     {
@@ -122,19 +141,21 @@ HMODULE Reflective(HANDLE hProcess, BYTE* MemoryStream)
 
         while (SIZE != SIZE_RELOCATION)
         {
-            BASE_RELOCATION_ENTRY (*Type)[1] = (ULONGLONG)BASE_RELOCATION + 8;
+            BASE_RELOCATION_ENTRY(*Type)
+            [1] = (ULONGLONG)BASE_RELOCATION + 8;
             for (int i = 0; i < (BASE_RELOCATION->SizeOfBlock - 8) / 2; i++)
             {
                 if ((*Type[i]).Offset != NULL)
                 {
                     ULONGLONG *HardCodingAddress = ImageBase + BASE_RELOCATION->VirtualAddress + (*Type[i]).Offset;
-                    ULONGLONG HardCodingData = *HardCodingAddress;
+                    ULONGLONG HardCodingData;
 
-                    /*if (ReadProcessMemory(pi.hProcess, HardCodingAddress, &HardCodingData, 8, NULL) == NULL)
+                    if (ReadProcessMemory(hProcess, HardCodingAddress, &HardCodingData, 8, NULL) == FALSE)
                     {
-                        printf("[-] Reloc Read Failed!\n");
-                        continue;
-                    }*/
+                        Failed("Reloc read failed!");
+                        VirtualFreeEx(hProcess, ImageBase, 0, MEM_RELEASE);
+                        return NULL;
+                    }
 
                     printf("[+] 0x%p : 0x%p -> ", HardCodingAddress, HardCodingData);
 
@@ -143,7 +164,12 @@ HMODULE Reflective(HANDLE hProcess, BYTE* MemoryStream)
 
                     printf("0x%p\n", HardCodingData);
 
-                    *HardCodingAddress = HardCodingData;
+                    if (WriteProcessMemory(hProcess, HardCodingAddress, &HardCodingData, 8, NULL) == FALSE)
+                    {
+                        Failed("Reloc write failed!");
+                        VirtualFreeEx(hProcess, ImageBase, 0, MEM_RELEASE);
+                        return NULL;
+                    }
                 }
             }
 
@@ -153,18 +179,18 @@ HMODULE Reflective(HANDLE hProcess, BYTE* MemoryStream)
     }
 
     PVOID EntryPoint = ImageBase + NT->OptionalHeader.AddressOfEntryPoint;
-    
+
     printf("[*] EntryPoint : 0x%p\n", EntryPoint);
 
     printf("[*] Create New Thread!\n");
 
     DWORD TID;
-    HANDLE hThread = CreateThread2(NULL, NULL, EntryPoint, CREATE_SUSPENDED, &TID, 3, ImageBase, DLL_PROCESS_ATTACH, NULL);
+    HANDLE hThread; //= CreateThread2(NULL, NULL, EntryPoint, CREATE_SUSPENDED, &TID, 3, ImageBase, DLL_PROCESS_ATTACH, NULL);
 
     if (hThread == NULL)
     {
         printf("[-] Failed create thread!\n");
-        VirtualFree(ImageBase, MEM_RELEASE, 0);
+        VirtualFreeEx(hProcess, ImageBase, 0, MEM_RELEASE);
         return NULL;
     }
 
@@ -174,4 +200,28 @@ HMODULE Reflective(HANDLE hProcess, BYTE* MemoryStream)
     printf("[+] ThreadId : %d\n", TID);
 
     return (HMODULE)ImageBase;
+}
+
+void Failed(LPCSTR Message)
+{
+    printf("[-] %s\n", Message);
+    DWORD ErrorCode = GetLastError();
+    printf("[+] GetLastError : %d\n", ErrorCode);
+    LPSTR ErrorMessage;
+    FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_ALLOCATE_BUFFER, NULL, ErrorCode, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), &ErrorMessage, 0, NULL);
+    printf("[+] ErrorMessage : %s\n", ErrorMessage);
+}
+
+__declspec(naked) void CallDllMain(HINSTANCE hinstDLL)
+{
+    __asm__ __volatile__ (
+        "push rbp\n\t"
+        "mov rbp, rsp\n\t"
+        "sub rsp, 0x20\n\t"
+        "mov rdx, 0x1\n\t"
+        "mov r8, 0x0\n\t"
+        
+        "leave\n\t"
+        "ret\n\t"
+    );
 }
