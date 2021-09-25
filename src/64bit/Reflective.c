@@ -81,8 +81,19 @@ HMODULE Reflective(HANDLE hProcess, BYTE *MemoryStream)
         printf("[+] Section mapping OK..!\n");
     }
 
-    /*IMAGE_IMPORT_DESCRIPTOR (*IMPORT)[1] = ImageBase + NT->OptionalHeader.DataDirectory[1].VirtualAddress;
+    IMAGE_IMPORT_DESCRIPTOR (*IMPORT)[1] = ImageBase + NT->OptionalHeader.DataDirectory[1].VirtualAddress;
     printf("[*] IAT Recovery\n");
+
+    PVOID SharedMemoryAddress = VirtualAllocEx(hProcess, NULL, 0, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+
+    if (SharedMemoryAddress == NULL)
+    {
+        Failed("Shared memory allocate failed!");
+        VirtualFreeEx(hProcess, ImageBase, 0, MEM_RELEASE);
+        return NULL;
+    }
+
+    HMODULE (__stdcall *pGetModuleHandleA)(LPCSTR);
 
     for (int i = 0;; i++)
     {
@@ -92,11 +103,23 @@ HMODULE Reflective(HANDLE hProcess, BYTE *MemoryStream)
         PSTR LibName = ImageBase + IMPORT[i]->Name;
         printf("[+] Library name : %s\n", LibName);
 
-        HMODULE hModule;
-        if (!(hModule = GetModuleHandleA(LibName)))
+        bSuccess = WriteProcessMemory(hProcess, SharedMemoryAddress, LibName, strlen(LibName) + 1, NULL);
+        if (!bSuccess)
         {
-            hModule = LoadLibraryA(LibName);
+            printf("Write library name failed!");
+            VirtualFreeEx(hProcess, ImageBase, 0, MEM_RELEASE);
+            return NULL;
         }
+
+        
+
+        HANDLE hThread = CreateRemoteThread(hProcess, NULL, NULL, GetModuleHandleA, SharedMemoryAddress, NULL, NULL);
+
+        // HMODULE hModule;
+        // if (!(hModule = GetModuleHandleA(LibName)))
+        // {
+        //     hModule = LoadLibraryA(LibName);
+        // }
 
         for (int j = 0;; j++)
         {
@@ -114,7 +137,7 @@ HMODULE Reflective(HANDLE hProcess, BYTE *MemoryStream)
                 *(ULONGLONG *)(ImageBase + IMPORT[i]->FirstThunk + j * 8) = GetProcAddress(hModule, IMPORT_NAME->Name);
             }
         }
-    }*/
+    }
 
     if (ImageBase != NT->OptionalHeader.ImageBase)
     {
@@ -220,8 +243,22 @@ __declspec(naked) void CallDllMain(HINSTANCE hinstDLL)
         "sub rsp, 0x20\n\t"
         "mov rdx, 0x1\n\t"
         "mov r8, 0x0\n\t"
-        
+
         "leave\n\t"
         "ret\n\t"
+    );
+}
+
+__declspec(naked) void *SearchFunction(int Key)
+{
+    __asm__ __volatile__ (
+        "push rbp\n\t"
+        "mov rbp, rsp\n\t"
+        "sub rsp, 0x20\n\t"
+        "mov qword ptr ds:[rbp+0x10], rcx\n\t" // Argument 1 save
+        "mov rax, gs:[0x60]\n\t"               // Get PEB
+        "mov rax, qword ptr ds:[rax+0x30]\n\t" // Get PEB_LDR_DATA
+        "mov qword ptr ds:[rsp+0x18], rax\n\t" // Save address
+        ""
     );
 }
