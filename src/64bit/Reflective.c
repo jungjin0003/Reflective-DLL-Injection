@@ -1,10 +1,10 @@
 #include "Reflective.h"
 
-__declspec(naked) void CallDllMain(HINSTANCE hinstDLL);
+void Failed(LPCSTR Message);
 
 int main()
 {
-    CallDllMain(NULL);
+
 }
 
 HMODULE Reflective(HANDLE hProcess, BYTE *MemoryStream)
@@ -49,7 +49,7 @@ HMODULE Reflective(HANDLE hProcess, BYTE *MemoryStream)
 
     if (ImageBase == NULL)
     {
-        printf("[-] VirtualAlloc failed!!\n");
+        Failed("VirtualAlloc failed!!");
         return NULL;
     }
     printf("[*] ImageBase : 0x%p\n", ImageBase);
@@ -106,11 +106,10 @@ HMODULE Reflective(HANDLE hProcess, BYTE *MemoryStream)
         bSuccess = WriteProcessMemory(hProcess, SharedMemoryAddress, LibName, strlen(LibName) + 1, NULL);
         if (!bSuccess)
         {
-            printf("Write library name failed!");
+            Failed("Write library name failed!");
             VirtualFreeEx(hProcess, ImageBase, 0, MEM_RELEASE);
             return NULL;
         }
-
         
 
         HANDLE hThread = CreateRemoteThread(hProcess, NULL, NULL, GetModuleHandleA, SharedMemoryAddress, NULL, NULL);
@@ -155,7 +154,7 @@ HMODULE Reflective(HANDLE hProcess, BYTE *MemoryStream)
 
         if (BASE_RELOCATION == NULL | SIZE_RELOCATION == 0)
         {
-            printf("[-] This DLL is not supported Relocation!\n");
+            Failed("This DLL is not supported Relocation!");
             VirtualFree(ImageBase, MEM_RELEASE, 0);
             return NULL;
         }
@@ -164,8 +163,7 @@ HMODULE Reflective(HANDLE hProcess, BYTE *MemoryStream)
 
         while (SIZE != SIZE_RELOCATION)
         {
-            BASE_RELOCATION_ENTRY(*Type)
-            [1] = (ULONGLONG)BASE_RELOCATION + 8;
+            BASE_RELOCATION_ENTRY (*Type)[1] = (ULONGLONG)BASE_RELOCATION + 8;
             for (int i = 0; i < (BASE_RELOCATION->SizeOfBlock - 8) / 2; i++)
             {
                 if ((*Type[i]).Offset != NULL)
@@ -207,20 +205,57 @@ HMODULE Reflective(HANDLE hProcess, BYTE *MemoryStream)
 
     printf("[*] Create New Thread!\n");
 
-    DWORD TID;
-    HANDLE hThread; //= CreateThread2(NULL, NULL, EntryPoint, CREATE_SUSPENDED, &TID, 3, ImageBase, DLL_PROCESS_ATTACH, NULL);
+    BYTE CallDllMainShellCode[] = { 0x55, 0x48, 0x89, 0xE5, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x89, 0xC8, 0x48, 0xB9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x48, 0xC7, 0xC2, 0x01, 0x00, 0x00, 0x00, 0x49, 0xC7, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x48, 0x01, 0xC8, 0xFF, 0xD0, 0xC9, 0xC3 };
 
-    if (hThread == NULL)
+    PVOID CallDllMain = VirtualAllocEx(hProcess, NULL, sizeof(CallDllMainShellCode), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+
+    if (CallDllMain == NULL)
     {
-        printf("[-] Failed create thread!\n");
+        Failed("Failed allocate shellcode space!");
         VirtualFreeEx(hProcess, ImageBase, 0, MEM_RELEASE);
         return NULL;
     }
 
-    ResumeThread(hThread);
+    *(ULONGLONG *)(CallDllMainShellCode + 13) = ImageBase;
+
+    if (WriteProcessMemory(hProcess, CallDllMain, CallDllMainShellCode, sizeof(CallDllMainShellCode), NULL) == FALSE)
+    {
+        Failed("CallDllMain ShellCode write failed!");
+        VirtualFreeEx(hProcess, ImageBase, 0, MEM_RELEASE);
+        VirtualFreeEx(hProcess, CallDllMain, 0, MEM_RELEASE);
+        return NULL;
+    }
+
+    DWORD TID;
+    HANDLE hThread = CreateThread(NULL, 0, CallDllMain, NT->OptionalHeader.AddressOfEntryPoint, 0, &TID); //= CreateThread2(NULL, NULL, EntryPoint, CREATE_SUSPENDED, &TID, 3, ImageBase, DLL_PROCESS_ATTACH, NULL);
+
+    if (hThread == NULL)
+    {
+        Failed("Failed create thread!");
+        VirtualFreeEx(hProcess, ImageBase, 0, MEM_RELEASE);
+        VirtualFreeEx(hProcess, CallDllMain, 0, MEM_RELEASE);
+        return NULL;
+    }
 
     printf("[+] Thread handle : 0x%x\n", hThread);
     printf("[+] ThreadId : %d\n", TID);
+
+    WaitForSingleObject(hThread, INFINITE);
+
+    DWORD ExitCode;
+
+    GetExitCodeThread(hThread, &ExitCode);
+
+    if (ExitCode)
+        printf("[+] Reflective DLL Injection success!!\n");
+    else
+    {
+        printf("[+] DllMain return value is FALSE!\n");
+        Failed("Reflective DLL Injection failed");
+        VirtualFreeEx(hProcess, ImageBase, 0, MEM_RELEASE);
+        VirtualFreeEx(hProcess, CallDllMain, 0, MEM_RELEASE);
+        return NULL;
+    }
 
     return (HMODULE)ImageBase;
 }
@@ -235,19 +270,19 @@ void Failed(LPCSTR Message)
     printf("[+] ErrorMessage : %s\n", ErrorMessage);
 }
 
-__declspec(naked) void CallDllMain(HINSTANCE hinstDLL)
-{
-    __asm__ __volatile__ (
-        "push rbp\n\t"
-        "mov rbp, rsp\n\t"
-        "sub rsp, 0x20\n\t"
-        "mov rdx, 0x1\n\t"
-        "mov r8, 0x0\n\t"
+// __declspec(naked) void CallDllMain(HINSTANCE hinstDLL)
+// {
+//     __asm__ __volatile__ (
+//         "push rbp\n\t"
+//         "mov rbp, rsp\n\t"
+//         "sub rsp, 0x20\n\t"
+//         "mov rdx, 0x1\n\t"
+//         "mov r8, 0x0\n\t"
 
-        "leave\n\t"
-        "ret\n\t"
-    );
-}
+//         "leave\n\t"
+//         "ret\n\t"
+//     );
+// }
 
 __declspec(naked) void *SearchFunction(int Key)
 {
