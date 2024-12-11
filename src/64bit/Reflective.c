@@ -7,7 +7,7 @@ IMAGE_SECTION_HEADER *FindSection(PVOID RVA, IMAGE_SECTION_HEADER (*SECTION)[1],
 HMODULE Reflective(HANDLE hProcess, BYTE *MemoryStream)
 {
     SIZE_T NumberOfBytesWritten;
-    WINBOOL bSuccess;
+    BOOL bSuccess;
     IMAGE_SECTION_HEADER *Section;
 
     ULONGLONG RawImageBase = MemoryStream;
